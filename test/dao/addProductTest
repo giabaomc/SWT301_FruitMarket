@@ -1,6 +1,6 @@
 package controllers;
 
-import dao.DBContext;
+import dal.DBContext;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
