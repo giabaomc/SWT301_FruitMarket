@@ -511,23 +511,23 @@ public class ProductDAOTest {
 
             if ("getInt".equals(mName)) {
                 int col = (Integer) args[0];
-                return switch (col) {
-                    case 1 -> cur.productID;
-                    case 5 -> cur.quantity;
-                    case 9 -> cur.status;
-                    default -> 0;
-                };
+                if (col == 1) return cur.productID;
+                if (col == 5) return cur.quantity;
+                if (col == 9) return cur.status;
+                return 0;
             }
             if ("getString".equals(mName)) {
-                if (args[0] instanceof Integer col) {
-                    return switch (col) {
-                        case 2 -> cur.productName;
-                        case 3 -> cur.image;
-                        case 6 -> cur.categoryID;
-                        default -> "";
-                    };
-                } else if (args[0] instanceof String colName) {
-                    if ("productName".equalsIgnoreCase(colName)) return cur.productName;
+                if (args[0] instanceof Integer) {
+                    int col = (Integer) args[0];
+                    if (col == 2) return cur.productName;
+                    if (col == 3) return cur.image;
+                    if (col == 6) return cur.categoryID;
+                    return "";
+                } else if (args[0] instanceof String) {
+                    String colName = (String) args[0];
+                    if ("productName".equalsIgnoreCase(colName)) {
+                        return cur.productName;
+                    }
                 }
             }
             if ("getDouble".equals(mName)) {
