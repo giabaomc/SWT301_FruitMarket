@@ -1,13 +1,20 @@
-
 package controllers;
 
-import dao.DBContext;
 import jakarta.servlet.RequestDispatcher;
-import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpSession;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -15,10 +22,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.Vector;
 import models.Cart;
 import org.junit.After;
 import org.junit.Before;
@@ -28,16 +36,11 @@ import static org.junit.Assert.*;
 
 public class CartServletTest {
 
-    private DBAccess db;
+    private ClassLoader loader;
+    private Connection connection;
     private int productId1;
     private int productId2;
     private int missingProductId;
-
-    private static class DBAccess extends DBContext {
-        Connection getConnection() {
-            return connection;
-        }
-    }
 
     private static class TestOutcome {
         String redirectUrl;
@@ -52,11 +55,12 @@ public class CartServletTest {
 
     @Before
     public void setUp() throws Exception {
-        db = new DBAccess();
+        loader = CartTestSupport.newLoader();
+        connection = CartTestSupport.connectionOf(loader, CartTestSupport.newDbContext(loader));
 
         assertNotNull(
                 "Database connection unavailable. Check ConnectDB.properties.",
-                db.getConnection()
+                connection
         );
 
         List<Integer> ids = new ArrayList<>();
@@ -64,8 +68,7 @@ public class CartServletTest {
         String sql = "SELECT TOP 2 productID "
                 + "FROM tblProducts ORDER BY productID";
 
-        try (PreparedStatement ps =
-                     db.getConnection().prepareStatement(sql);
+        try (PreparedStatement ps = connection.prepareStatement(sql);
              ResultSet rs = ps.executeQuery()) {
 
             while (rs.next()) {
@@ -85,8 +88,8 @@ public class CartServletTest {
 
     @After
     public void tearDown() throws Exception {
-        if (db != null && db.getConnection() != null) {
-            db.getConnection().close();
+        if (connection != null && !connection.isClosed()) {
+            connection.close();
         }
     }
 
@@ -99,8 +102,7 @@ public class CartServletTest {
         while (true) {
             boolean exists;
 
-            try (PreparedStatement ps =
-                         db.getConnection().prepareStatement(sql)) {
+            try (PreparedStatement ps = connection.prepareStatement(sql)) {
 
                 ps.setInt(1, candidate);
 
@@ -123,8 +125,6 @@ public class CartServletTest {
             FakeSession session,
             boolean usePost) {
 
-        TestOutcome outcome = new TestOutcome();
-
         Map<String, String> parameters = new HashMap<>();
 
         if (service != null) {
@@ -135,41 +135,37 @@ public class CartServletTest {
             parameters.put("productID", productID);
         }
 
+        return execute(parameters, session, usePost);
+    }
+
+    private TestOutcome execute(
+            Map<String, String> parameters,
+            FakeSession session,
+            boolean usePost) {
+
+        TestOutcome outcome = new TestOutcome();
+
         HttpSession httpSession = createSession(session);
-        HttpServletRequest request =
-                createRequest(parameters, httpSession, outcome);
+        HttpServletRequest request = createRequest(
+                parameters, httpSession, outcome, usePost ? "POST" : "GET");
         HttpServletResponse response = createResponse(outcome);
 
-        TestableCartServlet servlet = new TestableCartServlet();
+        HttpServlet servlet;
 
         try {
-            if (usePost) {
-                servlet.callPost(request, response);
-            } else {
-                servlet.callGet(request, response);
-            }
+            servlet = CartTestSupport.newCartServlet(loader);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Cannot create CartServlet", ex);
+        }
+
+        try {
+
+            servlet.service((ServletRequest) request, (ServletResponse) response);
         } catch (Throwable ex) {
             outcome.exception = ex;
         }
 
         return outcome;
-    }
-
-    private static class TestableCartServlet extends CartServlet {
-
-        void callGet(
-                HttpServletRequest request,
-                HttpServletResponse response)
-                throws ServletException, IOException {
-            super.doGet(request, response);
-        }
-
-        void callPost(
-                HttpServletRequest request,
-                HttpServletResponse response)
-                throws ServletException, IOException {
-            super.doPost(request, response);
-        }
     }
 
     private HttpSession createSession(FakeSession session) {
@@ -205,13 +201,17 @@ public class CartServletTest {
     private HttpServletRequest createRequest(
             Map<String, String> parameters,
             HttpSession session,
-            TestOutcome outcome) {
+            TestOutcome outcome,
+            String httpMethod) {
 
         return (HttpServletRequest) Proxy.newProxyInstance(
                 HttpServletRequest.class.getClassLoader(),
                 new Class<?>[]{HttpServletRequest.class},
                 (proxy, method, args) -> {
                     switch (method.getName()) {
+                        case "getMethod":
+                            return httpMethod;
+
                         case "getParameter":
                             return parameters.get(args[0]);
 
@@ -266,7 +266,23 @@ public class CartServletTest {
         return null;
     }
 
-    // UTCID01: Add a valid product for the first time.
+    private static void assertNullPointerFromCartServlet(TestOutcome outcome) {
+        assertTrue(
+                "Current code is expected to throw NullPointerException "
+                + "when DAO returns null, but got: " + outcome.exception,
+                outcome.exception instanceof NullPointerException
+        );
+
+        StackTraceElement[] trace = outcome.exception.getStackTrace();
+
+        assertTrue("NullPointerException has no stack trace.", trace.length > 0);
+        assertEquals(
+                "NullPointerException must be thrown inside CartServlet.",
+                "controllers.CartServlet",
+                trace[0].getClassName()
+        );
+    }
+
     @Test
     public void UTCID01_addValidProductFirstTime() {
         FakeSession session = new FakeSession();
@@ -290,7 +306,6 @@ public class CartServletTest {
         assertEquals(1, cart.getQuantity());
     }
 
-    // UTCID02: Add the same product again; quantity increases.
     @Test
     public void UTCID02_addSameProductAgain() {
         FakeSession session = new FakeSession();
@@ -313,7 +328,6 @@ public class CartServletTest {
         assertEquals(2, existing.getQuantity());
     }
 
-    // UTCID03: Different products use different session keys.
     @Test
     public void UTCID03_addDifferentProducts() {
         FakeSession session = new FakeSession();
@@ -347,7 +361,6 @@ public class CartServletTest {
         assertEquals(1, cart2.getQuantity());
     }
 
-    // UTCID04: A product ID that does not exist in the database.
     @Test
     public void UTCID04_addNonExistingProduct() {
         FakeSession session = new FakeSession();
@@ -359,14 +372,9 @@ public class CartServletTest {
                 false
         );
 
-        assertTrue(
-                "Current code is expected to throw NullPointerException "
-                + "when DAO returns null.",
-                outcome.exception instanceof NullPointerException
-        );
+        assertNullPointerFromCartServlet(outcome);
     }
 
-    // UTCID05: Missing productID parameter.
     @Test
     public void UTCID05_missingProductID() {
         FakeSession session = new FakeSession();
@@ -379,12 +387,12 @@ public class CartServletTest {
         );
 
         assertTrue(
-                "Current code is expected to throw NumberFormatException.",
+                "Current code is expected to throw NumberFormatException, "
+                + "but got: " + outcome.exception,
                 outcome.exception instanceof NumberFormatException
         );
     }
 
-    // UTCID06: Non-numeric productID.
     @Test
     public void UTCID06_nonNumericProductID() {
         FakeSession session = new FakeSession();
@@ -397,12 +405,12 @@ public class CartServletTest {
         );
 
         assertTrue(
-                "Current code is expected to throw NumberFormatException.",
+                "Current code is expected to throw NumberFormatException, "
+                + "but got: " + outcome.exception,
                 outcome.exception instanceof NumberFormatException
         );
     }
 
-    // UTCID07: Boundary value productID = 0.
     @Test
     public void UTCID07_zeroProductID() {
         FakeSession session = new FakeSession();
@@ -414,13 +422,9 @@ public class CartServletTest {
                 false
         );
 
-        assertTrue(
-                "Expected NullPointerException if product ID 0 is absent.",
-                outcome.exception instanceof NullPointerException
-        );
+        assertNullPointerFromCartServlet(outcome);
     }
 
-    // UTCID08: Negative productID.
     @Test
     public void UTCID08_negativeProductID() {
         FakeSession session = new FakeSession();
@@ -432,13 +436,9 @@ public class CartServletTest {
                 false
         );
 
-        assertTrue(
-                "Expected NullPointerException if product ID -1 is absent.",
-                outcome.exception instanceof NullPointerException
-        );
+        assertNullPointerFromCartServlet(outcome);
     }
 
-    // UTCID09: Add a valid product through an HTTP POST request.
     @Test
     public void UTCID09_addValidProductUsingPost() {
         FakeSession session = new FakeSession();
@@ -460,5 +460,232 @@ public class CartServletTest {
         assertNotNull(cart);
         assertEquals(productId1, cart.getProductID());
         assertEquals(1, cart.getQuantity());
+    }
+
+    @Test
+    public void UTCID10_showCartWhenEmpty() {
+        FakeSession session = new FakeSession();
+
+        TestOutcome outcome = execute(
+                "showCart",
+                null,
+                session,
+                false
+        );
+
+        assertNull("Unexpected exception: " + outcome.exception,
+                outcome.exception);
+        assertEquals("jsp/cartjsp.jsp", outcome.forwardPath);
+        assertNull(outcome.redirectUrl);
+
+        Vector<?> vector = (Vector<?>) outcome.requestAttributes.get("vector");
+
+        assertNotNull(vector);
+        assertTrue(vector.isEmpty());
+    }
+
+    @Test
+    public void UTCID11_showCartIsDefaultService() {
+        FakeSession session = new FakeSession();
+
+        Cart cart1 = new Cart(productId1, "Product 1", 10.0, 2);
+        Cart cart2 = new Cart(productId2, "Product 2", 20.0, 1);
+
+        session.attributes.put("email", "customer@vuonqua.local");
+        session.attributes.put(String.valueOf(productId1), cart1);
+        session.attributes.put(String.valueOf(productId2), cart2);
+
+        TestOutcome outcome = execute(
+                null,
+                null,
+                session,
+                false
+        );
+
+        assertNull("Unexpected exception: " + outcome.exception,
+                outcome.exception);
+        assertEquals("jsp/cartjsp.jsp", outcome.forwardPath);
+
+        Vector<?> vector = (Vector<?>) outcome.requestAttributes.get("vector");
+
+        assertNotNull(vector);
+        assertEquals(2, vector.size());
+        assertTrue(vector.contains(cart1));
+        assertTrue(vector.contains(cart2));
+    }
+
+    @Test
+    public void UTCID12_removeExistingProduct() {
+        FakeSession session = new FakeSession();
+
+        session.attributes.put(String.valueOf(productId1),
+                new Cart(productId1, "Product 1", 10.0, 1));
+        session.attributes.put(String.valueOf(productId2),
+                new Cart(productId2, "Product 2", 20.0, 1));
+
+        Map<String, String> parameters = new HashMap<>();
+        parameters.put("service", "remove");
+        parameters.put("productId", String.valueOf(productId1));
+
+        TestOutcome outcome = execute(parameters, session, false);
+
+        assertNull("Unexpected exception: " + outcome.exception,
+                outcome.exception);
+        assertEquals("cart", outcome.redirectUrl);
+        assertFalse(session.attributes.containsKey(String.valueOf(productId1)));
+        assertTrue(session.attributes.containsKey(String.valueOf(productId2)));
+    }
+
+    @Test
+    public void UTCID13_removeAllKeepsEmail() {
+        FakeSession session = new FakeSession();
+
+        session.attributes.put("email", "customer@vuonqua.local");
+        session.attributes.put(String.valueOf(productId1),
+                new Cart(productId1, "Product 1", 10.0, 1));
+        session.attributes.put(String.valueOf(productId2),
+                new Cart(productId2, "Product 2", 20.0, 1));
+
+        TestOutcome outcome = execute(
+                "removeAll",
+                null,
+                session,
+                false
+        );
+
+        assertNull("Unexpected exception: " + outcome.exception,
+                outcome.exception);
+        assertEquals("cart", outcome.redirectUrl);
+        assertEquals(1, session.attributes.size());
+        assertTrue(session.attributes.containsKey("email"));
+    }
+
+    @Test
+    public void UTCID14_showCartAfterLoginThrowsClassCastException() {
+        FakeSession session = new FakeSession();
+
+        session.attributes.put("email", "customer@vuonqua.local");
+        session.attributes.put("role", "customer");
+        session.attributes.put(String.valueOf(productId1),
+                new Cart(productId1, "Product 1", 10.0, 1));
+
+        TestOutcome outcome = execute(
+                "showCart",
+                null,
+                session,
+                false
+        );
+
+        assertTrue(
+                "Current code is expected to throw ClassCastException "
+                + "because the 'role' attribute is not a Cart, but got: "
+                + outcome.exception,
+                outcome.exception instanceof ClassCastException
+        );
+        assertNull(outcome.forwardPath);
+    }
+
+    private static final class CartTestSupport {
+
+        static final String CONFIG_RESOURCE = "../ConnectDB.properties";
+
+        static final Set<String> ISOLATED = Set.of(
+                "dao.DBContext",
+                "dao.CartDAO",
+                "controllers.CartServlet");
+
+        static byte[] realConfig() {
+            String path = System.getProperty("configFile", "web/WEB-INF/ConnectDB.properties");
+            try {
+                return Files.readAllBytes(Path.of(path));
+            } catch (IOException ex) {
+                throw new UncheckedIOException("Cannot read DB config " + Path.of(path).toAbsolutePath(), ex);
+            }
+        }
+
+        static ClassLoader newLoader() {
+            return new IsolatedLoader(CartServletTest.class.getClassLoader(), realConfig());
+        }
+
+        static Object newDbContext(ClassLoader loader) throws Exception {
+            return create(loader, "dao.DBContext");
+        }
+
+        static HttpServlet newCartServlet(ClassLoader loader) throws Exception {
+            return (HttpServlet) create(loader, "controllers.CartServlet");
+        }
+
+        static Connection connectionOf(ClassLoader loader, Object dbContext) throws Exception {
+            Field field = Class.forName("dao.DBContext", true, loader).getDeclaredField("connection");
+            field.setAccessible(true);
+            return (Connection) field.get(dbContext);
+        }
+
+        private static Object create(ClassLoader loader, String className) throws Exception {
+            try {
+                return Class.forName(className, true, loader).getDeclaredConstructor().newInstance();
+            } catch (InvocationTargetException ex) {
+                Throwable cause = ex.getCause();
+                if (cause instanceof Exception) {
+                    throw (Exception) cause;
+                }
+                if (cause instanceof Error) {
+                    throw (Error) cause;
+                }
+                throw ex;
+            }
+        }
+
+        private static boolean isIsolated(String name) {
+            for (String isolated : ISOLATED) {
+                if (name.equals(isolated) || name.startsWith(isolated + "$")) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static final class IsolatedLoader extends ClassLoader {
+
+            private final byte[] config;
+
+            IsolatedLoader(ClassLoader parent, byte[] config) {
+                super(parent);
+                this.config = config;
+            }
+
+            @Override
+            protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if (!isIsolated(name)) {
+                    return super.loadClass(name, resolve);
+                }
+                synchronized (getClassLoadingLock(name)) {
+                    Class<?> c = findLoadedClass(name);
+                    if (c == null) {
+                        try (InputStream in = getParent().getResourceAsStream(name.replace('.', '/') + ".class")) {
+                            if (in == null) {
+                                throw new ClassNotFoundException(name);
+                            }
+                            byte[] bytes = in.readAllBytes();
+                            c = defineClass(name, bytes, 0, bytes.length);
+                        } catch (IOException ex) {
+                            throw new ClassNotFoundException(name, ex);
+                        }
+                    }
+                    if (resolve) {
+                        resolveClass(c);
+                    }
+                    return c;
+                }
+            }
+
+            @Override
+            public InputStream getResourceAsStream(String name) {
+                if (CONFIG_RESOURCE.equals(name)) {
+                    return new ByteArrayInputStream(config);
+                }
+                return super.getResourceAsStream(name);
+            }
+        }
     }
 }
