@@ -174,15 +174,12 @@ public class ProductSearchIntegrationTest {
 
         // Action 2: User searches for the same product name 'Thom mat'
         Vector<Product> searchResults = dao.searchProductByName("Thom mat");
+        assertEquals("Search excludes inactive product (status=1 required in DAO)", 0, searchResults.size());
 
-        // Defect IT-D02 Verification:
-        // 1. In list view, the deactivated product IS displayed
-        assertTrue("DEFECT IT-D02: listProduct displays deactivated product (status=0)", foundInList);
-        // 2. In search view, the deactivated product IS NOT found
-        assertEquals("DEFECT IT-D02: searchProductByName excludes deactivated product (status=1 required in DAO)", 0, searchResults.size());
-
-        // Inconsistency detected: Customer sees product in list, but search returns "Không tìm thấy hoa quả nào."
-        // This test accurately confirms Defect IT-D02 as documented in the Excel report!
+        // Step 3: Assert against EXPECTED RESULTS from Excel Report (Expected: inactive product hidden from customer list)
+        // ACTUAL BEHAVIOR: Deactivated product is still returned in list!
+        // THIS ASSERTION WILL FAIL, revealing Defect IT-D02 in JUnit!
+        assertFalse("PS3 FAILED (Defect IT-D02): Deactivated product (status=0) must not be displayed in customer product list (ProductJSP line 29 missing 'WHERE status=1')", foundInList);
     }
 
     // =========================================================================
@@ -194,26 +191,21 @@ public class ProductSearchIntegrationTest {
      * Integration Scope: Search Input "   Tao Fuji   " -> PreparedStatement LIKE binding
      * Status in Document: FAILED (Defect IT-D03)
      *
-     * DEFECT ANALYSIS:
-     * - ProductDAO line 127 binds: ptm.setString(1, "%" + name + "%");
-     * - Because name is NOT trimmed, SQL becomes: LIKE '%   Tao Fuji   %'.
-     * - In MySQL, "Tao Fuji" does NOT contain leading/trailing spaces, so query returns empty!
+     * Expected Result in Excel:
+     * - System trims whitespace automatically and finds product "Tao Fuji" (expected size = 1).
+     * Actual Result:
+     * - Returns 0 results because ProductDAO does not trim input before binding LIKE query.
      */
     @Test
     public void testPS4_SearchWithWhitespace_FailsDueToUntrimmedLikeQuery_Defect_IT_D03() {
         String inputWithSpaces = "   Tao Fuji   ";
 
-        // Current implementation without trim
         Vector<Product> resultWithSpaces = dao.searchProductByName(inputWithSpaces);
 
-        // Defect IT-D03 Verification:
-        // Expected behavior: Product should be found.
-        // Actual behavior (Defect): Empty list returned because "%   Tao Fuji   %" fails to match.
-        assertEquals("DEFECT IT-D03: Search fails when input has whitespace because name is untrimmed", 0, resultWithSpaces.size());
-
-        // Contrast: If input is trimmed properly:
-        Vector<Product> trimmedResult = dao.searchProductByName(inputWithSpaces.trim());
-        assertEquals("When input is trimmed, product 'Tao Fuji' is found successfully", 1, trimmedResult.size());
+        // Step: Assert against EXPECTED RESULTS from Excel Report (Expected: 1 product found)
+        // ACTUAL BEHAVIOR: 0 products found!
+        // THIS ASSERTION WILL FAIL, revealing Defect IT-D03 in JUnit!
+        assertEquals("PS4 FAILED (Defect IT-D03): Expected search to find 'Tao Fuji' when keyword has leading/trailing whitespace, but returned empty list", 1, resultWithSpaces.size());
     }
 
     // =========================================================================
