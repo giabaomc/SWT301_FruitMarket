@@ -1,0 +1,309 @@
+package selenium;
+
+import java.time.Duration;
+import java.util.List;
+import org.junit.Assume;
+import org.junit.Test;
+import org.openqa.selenium.By;
+import org.openqa.selenium.WebElement;
+import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.chrome.ChromeOptions;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+/** Selenium checks for the Cart worksheet cases CT-01 through CT-18. */
+public class CartWorkbookIntegrationTest extends SeleniumTestBase {
+
+    @Test // Excel CT-01
+    public void ct01_addProductToCart() {
+        openCatalog();
+        addProduct(7);
+        openCart();
+        assertLine(7, "Tao Fuji", 1, 75000.0);
+        assertTotal("75000.0");
+    }
+
+    @Test // Excel CT-02
+    public void ct02_addingSameProductIncreasesQuantity() {
+        openCatalog();
+        addProduct(7);
+        addProduct(7);
+        openCart();
+        assertEquals(1, cartLineCount());
+        assertLine(7, "Tao Fuji", 2, 150000.0);
+        assertTotal("150000.0");
+    }
+
+    @Test // Excel CT-03
+    public void ct03_differentProductsHaveSeparateLinesAndCorrectTotal() {
+        openCatalog();
+        addProduct(7);
+        addProduct(10);
+        addProduct(10);
+        openCart();
+        assertEquals(2, cartLineCount());
+        assertLine(7, "Tao Fuji", 1, 75000.0);
+        assertLine(10, "Thom mat", 2, 60000.0);
+        assertTotal("135000.0");
+    }
+
+    @Test // Excel CT-04
+    public void ct04_unknownProductIdIsHandledGracefully() {
+        driver.get(baseUrl + "/cart?service=add2cart&productID=9999");
+        assertNoServerError();
+        openCart();
+        assertEmptyCart();
+    }
+
+    @Test // Excel CT-05
+    public void ct05_missingAndNonNumericProductIdAreHandledGracefully() {
+        driver.get(baseUrl + "/cart?service=add2cart");
+        assertNoServerError();
+        driver.get(baseUrl + "/cart?service=add2cart&productID=abc");
+        assertNoServerError();
+        openCart();
+        assertEmptyCart();
+    }
+
+    @Test // Excel CT-06; requires product 2 to be DeActive as set up by PM-18.
+    public void ct06_deactivatedProductCannotBeAdded() {
+        openCatalog();
+        WebElement row = productRow(2);
+        Assume.assumeTrue("Precondition: product 2 must be DeActive (PM-18).",
+                row.findElements(By.tagName("td")).get(8).getText().contains("DeActive"));
+        addProduct(2);
+        openCart();
+        assertFalse("A DeActive product must not appear in the cart.",
+                pageText().contains("Dua hau khong hat"));
+    }
+
+    @Test // Excel CT-07; requires the PM-02 Stock Test product with stock 2.
+    public void ct07_cartQuantityCannotExceedStock() {
+        openCatalog();
+        WebElement row = productRowByName("Stock Test");
+        Assume.assumeTrue("Precondition: create Stock Test with stock 2 (PM-02).",
+                row != null && row.findElements(By.tagName("td")).size() > 4
+                        && "2".equals(row.findElements(By.tagName("td")).get(4).getText().trim()));
+        int productId = Integer.parseInt(row.findElements(By.tagName("td")).get(0).getText().trim());
+        addProduct(productId);
+        addProduct(productId);
+        addProduct(productId);
+        openCart();
+        assertTrue("Cart quantity must not exceed stock (2).", cartQuantity(productId) <= 2);
+    }
+
+    @Test // Excel CT-08
+    public void ct08_emptyCartShowsMessageAndActions() {
+        openCart();
+        assertEmptyCart();
+        assertTotal("0.0");
+        assertTrue(driver.findElement(By.cssSelector("a[href='productjsp']")).isDisplayed());
+        assertTrue(driver.findElement(By.cssSelector("a[href='cart?service=removeAll']")).isDisplayed());
+    }
+
+    @Test // Excel CT-09
+    public void ct09_cartPersistsWhileContinuingShopping() {
+        openCatalog();
+        addProduct(7);
+        openCart();
+        clickAndWaitForNewPage(By.cssSelector(".page-actions a[href='productjsp']"));
+        addProduct(6);
+        openCart();
+        assertEquals(2, cartLineCount());
+        assertLine(7, "Tao Fuji", 1, 75000.0);
+        assertLine(6, "Chuoi tieu", 1, 28000.0);
+        assertTotal("103000.0");
+    }
+
+    @Test // Excel CT-10
+    public void ct10_customerCanOpenCartAfterLogin() {
+        login(CUSTOMER_EMAIL, CUSTOMER_PASSWORD);
+        addProduct(7);
+        openCart();
+        assertLine(7, "Tao Fuji", 1, 75000.0);
+        assertTotal("75000.0");
+        assertEquals("Xin chào, " + CUSTOMER_EMAIL, driver.findElement(By.cssSelector(".nav-user")).getText());
+    }
+
+    @Test // Excel CT-11
+    public void ct11_adminCanOpenCartAfterLogin() {
+        login(ADMIN_EMAIL, ADMIN_PASSWORD);
+        addProduct(7);
+        openCart();
+        assertLine(7, "Tao Fuji", 1, 75000.0);
+        assertTotal("75000.0");
+        assertEquals("Xin chào, " + ADMIN_EMAIL, driver.findElement(By.cssSelector(".nav-user")).getText());
+    }
+
+    @Test // Excel CT-12
+    public void ct12_removeOneLineRecalculatesTotal() {
+        openCatalog();
+        addProduct(7);
+        addProduct(10);
+        addProduct(10);
+        openCart();
+        clickAndWaitForNewPage(By.cssSelector("a[href='cart?service=remove&productId=7']"));
+        assertEquals(1, cartLineCount());
+        assertLine(10, "Thom mat", 2, 60000.0);
+        assertTotal("60000.0");
+    }
+
+    @Test // Excel CT-13
+    public void ct13_removingLastLineShowsEmptyCart() {
+        openCatalog();
+        addProduct(7);
+        openCart();
+        clickAndWaitForNewPage(By.cssSelector("a[href='cart?service=remove&productId=7']"));
+        assertEmptyCart();
+        assertTotal("0.0");
+    }
+
+    @Test // Excel CT-14
+    public void ct14_clearCartRemovesAllLines() {
+        openCatalog();
+        addProduct(7);
+        addProduct(6);
+        openCart();
+        clickAndWaitForNewPage(By.cssSelector("a[href='cart?service=removeAll']"));
+        assertEmptyCart();
+        assertTotal("0.0");
+    }
+
+    @Test // Excel CT-15
+    public void ct15_clearingCartKeepsAdminRole() {
+        login(ADMIN_EMAIL, ADMIN_PASSWORD);
+        addProduct(7);
+        driver.get(baseUrl + "/cart?service=removeAll");
+        openCatalog();
+        assertEquals("Xin chào, " + ADMIN_EMAIL, driver.findElement(By.cssSelector(".nav-user")).getText());
+        assertTrue(driver.findElement(By.cssSelector("a[href='productjsp?service=addProduct']")).isDisplayed());
+    }
+
+    @Test // Excel CT-16
+    public void ct16_nonNumericRemoveIdIsHandledGracefully() {
+        driver.get(baseUrl + "/cart?service=remove&productId=abc");
+        assertNoServerError();
+    }
+
+    @Test // Excel CT-17
+    public void ct17_eachBrowserSessionHasAnIndependentCart() {
+        openCatalog();
+        addProduct(7);
+        openCart();
+        assertLine(7, "Tao Fuji", 1, 75000.0);
+
+        ChromeDriver secondSession = new ChromeDriver(new ChromeOptions());
+        try {
+            secondSession.manage().timeouts().implicitlyWait(Duration.ofSeconds(5));
+            secondSession.get(baseUrl + "/cart?service=showCart");
+            assertTrue("A separate browser session should start with an empty cart.",
+                    secondSession.getPageSource().contains("Giỏ hàng của bạn đang trống."));
+        } finally {
+            secondSession.quit();
+        }
+
+        openCart();
+        assertLine(7, "Tao Fuji", 1, 75000.0);
+    }
+
+    @Test // Excel CT-18
+    public void ct18_unknownServiceDoesNotReturnBlankPage() {
+        driver.get(baseUrl + "/cart?service=abc");
+        String body = driver.findElement(By.tagName("body")).getText().trim();
+        assertFalse("Unknown service must not return a blank page.", body.isEmpty());
+        assertTrue("Expected the cart page or a clear error page.",
+                body.contains("Giỏ hàng") || body.toLowerCase().contains("error"));
+    }
+
+    private void openCatalog() {
+        driver.get(baseUrl + "/productjsp?service=listProduct");
+    }
+
+    private void openCart() {
+        driver.get(baseUrl + "/cart?service=showCart");
+    }
+
+    private void addProduct(int productId) {
+        productRow(productId);
+        clickAndWaitForNewPage(By.cssSelector(
+                "a[href*='service=add2cart&productID=" + productId + "']"));
+    }
+
+    private WebElement productRow(int productId) {
+        for (WebElement row : driver.findElements(By.cssSelector(".table-wrap table tbody tr"))) {
+            List<WebElement> cells = row.findElements(By.tagName("td"));
+            if (cells.size() >= 10 && String.valueOf(productId).equals(cells.get(0).getText().trim())) {
+                return row;
+            }
+        }
+        throw new AssertionError("Product ID " + productId + " is not visible in the product list.");
+    }
+
+    private WebElement productRowByName(String productName) {
+        for (WebElement row : driver.findElements(By.cssSelector(".table-wrap table tbody tr"))) {
+            if (row.getText().contains(productName)) {
+                return row;
+            }
+        }
+        return null;
+    }
+
+    private void login(String email, String password) {
+        driver.get(baseUrl + "/productjsp?service=login");
+        driver.findElement(By.id("txtemail")).sendKeys(email);
+        driver.findElement(By.id("txtpass")).sendKeys(password);
+        clickAndWaitForNewPage(By.cssSelector("input[type='submit']"));
+        assertFalse("Login should succeed before the cart steps.",
+                driver.getPageSource().contains("Login Failed!"));
+    }
+
+    private int cartLineCount() {
+        int count = 0;
+        for (WebElement row : driver.findElements(By.cssSelector(".table-wrap table tbody tr"))) {
+            if (row.findElements(By.tagName("td")).size() == 6) count++;
+        }
+        return count;
+    }
+
+    private WebElement cartRow(int productId) {
+        for (WebElement row : driver.findElements(By.cssSelector(".table-wrap table tbody tr"))) {
+            List<WebElement> cells = row.findElements(By.tagName("td"));
+            if (cells.size() == 6 && String.valueOf(productId).equals(cells.get(0).getText().trim())) {
+                return row;
+            }
+        }
+        throw new AssertionError("Cart line for product ID " + productId + " was not found.");
+    }
+
+    private int cartQuantity(int productId) {
+        return Integer.parseInt(cartRow(productId).findElements(By.tagName("td")).get(3).getText().trim());
+    }
+
+    private void assertLine(int productId, String name, int quantity, double lineTotal) {
+        List<WebElement> cells = cartRow(productId).findElements(By.tagName("td"));
+        assertEquals(name, cells.get(1).getText().trim());
+        assertEquals(quantity, Integer.parseInt(cells.get(3).getText().trim()));
+        assertEquals(lineTotal, Double.parseDouble(cells.get(4).getText().trim()), 0.001);
+    }
+
+    private void assertTotal(String amount) {
+        String total = driver.findElement(By.cssSelector(".cart-total")).getText();
+        assertTrue("Unexpected total: " + total, total.contains(amount));
+    }
+
+    private void assertEmptyCart() {
+        assertTrue(pageText().contains("Giỏ hàng của bạn đang trống."));
+    }
+
+    private String pageText() {
+        return driver.findElement(By.tagName("body")).getText();
+    }
+
+    private void assertNoServerError() {
+        String source = driver.getPageSource().toLowerCase();
+        assertFalse("Unexpected HTTP 500 response.", source.contains("http status 500"));
+        assertFalse("Unexpected server exception page.", source.contains("exception report"));
+    }
+}
