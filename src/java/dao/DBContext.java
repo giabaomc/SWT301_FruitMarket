@@ -25,8 +25,19 @@ public class DBContext {
         try {
             Properties properties = new Properties();
             InputStream inputStream = getClass().getClassLoader().getResourceAsStream("../ConnectDB.properties");
+            if (inputStream == null) {
+                inputStream = getClass().getClassLoader().getResourceAsStream("ConnectDB.properties");
+            }
+            if (inputStream == null) {
+                try {
+                    inputStream = new java.io.FileInputStream("web/WEB-INF/ConnectDB.properties");
+                } catch (Exception ignored) {
+                }
+            }
             try {
-                properties.load(inputStream);
+                if (inputStream != null) {
+                    properties.load(inputStream);
+                }
             } catch (IOException ex) {
                 Logger.getLogger(DBContext.class.getName()).log(Level.SEVERE, null, ex);
             }
