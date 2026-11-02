@@ -318,4 +318,26 @@ public class ProductSearchIntegrationTest {
         Vector<Product> withoutDiacritics = dao.searchProductByName("Cam sanh");
         assertEquals("Non-diacritic input matches DB record", 1, withoutDiacritics.size());
     }
+
+    /**
+     * PS9: Verify search behavior when user enters SQL wildcard character '%' into search box.
+     * Integration Scope: Wildcard input '%' -> PreparedStatement LIKE query
+     * Status in Document: FAILED (Defect IT-D04)
+     *
+     * Expected Result in Excel:
+     * - Search input escapes '%' as a literal character; returns 0 products (no fruit has '%' in name).
+     * Actual Result (Defect IT-D04):
+     * - ProductDAO concatenates "%" + name + "%" without escaping, turning the query into LIKE '%%%%',
+     *   which matches and returns all active products in the database!
+     */
+    @Test
+    public void testPS9_SQLWildcardCharacterSearch_Defect_IT_D04() {
+        String wildcard = "%";
+        Vector<Product> result = dao.searchProductByName(wildcard);
+
+        // Step: Assert against EXPECTED RESULTS from Excel Report (Expected: literal search returns 0)
+        // ACTUAL BEHAVIOR: Returns all 10 products because '%' was not escaped!
+        // THIS ASSERTION WILL FAIL, revealing Defect IT-D04 in JUnit!
+        assertEquals("PS9 FAILED (Defect IT-D04): Wildcard character '%' must be escaped as literal, but matched all products in database", 0, result.size());
+    }
 }
