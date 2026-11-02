@@ -1,7 +1,20 @@
 package selenium;
 
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.Date;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.List;
+import java.util.Properties;
+import org.junit.Before;
 import org.junit.Assume;
 import org.junit.Test;
 import org.openqa.selenium.By;
@@ -11,10 +24,50 @@ import org.openqa.selenium.chrome.ChromeOptions;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 /** Selenium checks for the Cart worksheet cases CT-01 through CT-18. */
 public class CartWorkbookIntegrationTest extends SeleniumTestBase {
+
+    private static final String STOCK_TEST_NAME = "Stock Test";
+
+    /** The base catalog and login accounts come from the project's seed script. */
+    @Before
+    public void requireSeedData() {
+        String missingData = null;
+        try (Connection connection = openDatabase()) {
+            String productsSql = "SELECT COUNT(*) FROM tblProducts WHERE "
+                    + "(productID=2 AND productName=N'Dua hau khong hat') OR "
+                    + "(productID=6 AND productName=N'Chuoi tieu') OR "
+                    + "(productID=7 AND productName=N'Tao Fuji') OR "
+                    + "(productID=10 AND productName=N'Thom mat')";
+            try (Statement statement = connection.createStatement();
+                 ResultSet result = statement.executeQuery(productsSql)) {
+                result.next();
+                if (result.getInt(1) != 4) {
+                    missingData = "Run sql/fruit_market.sql first; expected seed products are missing.";
+                }
+            }
+
+            String usersSql = "SELECT COUNT(DISTINCT email) FROM tblUsers "
+                    + "WHERE email IN (?, ?)";
+            try (PreparedStatement statement = connection.prepareStatement(usersSql)) {
+                statement.setString(1, ADMIN_EMAIL);
+                statement.setString(2, CUSTOMER_EMAIL);
+                try (ResultSet result = statement.executeQuery()) {
+                    result.next();
+                    if (result.getInt(1) != 2 && missingData == null) {
+                        missingData = "Run sql/fruit_market.sql first; seeded admin/customer accounts are missing.";
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            missingData = "SQL Server or the configured test database is unavailable: "
+                    + ex.getClass().getSimpleName();
+        }
+        Assume.assumeTrue(missingData == null, missingData);
+    }
 
     @Test // Excel CT-01
     public void ct01_addProductToCart() {
@@ -67,31 +120,42 @@ public class CartWorkbookIntegrationTest extends SeleniumTestBase {
         assertEmptyCart();
     }
 
-    @Test // Excel CT-06; requires product 2 to be DeActive as set up by PM-18.
+    @Test // Excel CT-06; the test sets and restores the product status itself.
     public void ct06_deactivatedProductCannotBeAdded() {
-        openCatalog();
-        WebElement row = productRow(2);
-        Assume.assumeTrue("Precondition: product 2 must be DeActive (PM-18).",
-                row.findElements(By.tagName("td")).get(8).getText().contains("DeActive"));
-        addProduct(2);
-        openCart();
-        assertFalse("A DeActive product must not appear in the cart.",
-                pageText().contains("Dua hau khong hat"));
+        try (Connection connection = openDatabase()) {
+            int originalStatus = productStatus(connection, 2);
+            try {
+                setProductStatus(connection, 2, 0);
+                openCatalog();
+                WebElement row = productRow(2);
+                assertTrue("Product 2 should be DeActive for CT-06.",
+                        row.findElements(By.tagName("td")).get(8).getText().contains("DeActive"));
+                addProduct(2);
+                openCart();
+                assertFalse("A DeActive product must not appear in the cart.",
+                        pageText().contains("Dua hau khong hat"));
+            } finally {
+                setProductStatus(connection, 2, originalStatus);
+            }
+        } catch (Exception ex) {
+            throw new AssertionError("Could not prepare/restore product 2 for CT-06.", ex);
+        }
     }
 
-    @Test // Excel CT-07; requires the PM-02 Stock Test product with stock 2.
-    public void ct07_cartQuantityCannotExceedStock() {
+    @Test // Excel CT-07; the test creates or temporarily adjusts Stock Test.
+    public void ct07_cartQuantityCannotExceedStock() throws Exception {
+        try (StockTestFixture fixture = StockTestFixture.prepare()) {
         openCatalog();
-        WebElement row = productRowByName("Stock Test");
-        Assume.assumeTrue("Precondition: create Stock Test with stock 2 (PM-02).",
-                row != null && row.findElements(By.tagName("td")).size() > 4
-                        && "2".equals(row.findElements(By.tagName("td")).get(4).getText().trim()));
+        WebElement row = productRowByName(STOCK_TEST_NAME);
+        assertNotNull("The Stock Test fixture should be visible in the catalog.", row);
+        assertEquals("2", row.findElements(By.tagName("td")).get(4).getText().trim());
         int productId = Integer.parseInt(row.findElements(By.tagName("td")).get(0).getText().trim());
         addProduct(productId);
         addProduct(productId);
         addProduct(productId);
         openCart();
         assertTrue("Cart quantity must not exceed stock (2).", cartQuantity(productId) <= 2);
+        }
     }
 
     @Test // Excel CT-08
@@ -305,5 +369,110 @@ public class CartWorkbookIntegrationTest extends SeleniumTestBase {
         String source = driver.getPageSource().toLowerCase();
         assertFalse("Unexpected HTTP 500 response.", source.contains("http status 500"));
         assertFalse("Unexpected server exception page.", source.contains("exception report"));
+    }
+
+    private static Connection openDatabase() throws Exception {
+        String configPath = System.getProperty("configFile", "web/WEB-INF/ConnectDB.properties");
+        Properties properties = new Properties();
+        try (InputStream input = Files.newInputStream(Path.of(configPath))) {
+            properties.load(input);
+        }
+        Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver");
+        return DriverManager.getConnection(
+                properties.getProperty("url"),
+                properties.getProperty("userID"),
+                properties.getProperty("password"));
+    }
+
+    private static int productStatus(Connection connection, int productId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT status FROM tblProducts WHERE productID=?")) {
+            statement.setInt(1, productId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) throw new SQLException("Seed product " + productId + " was not found.");
+                return result.getInt(1);
+            }
+        }
+    }
+
+    private static void setProductStatus(Connection connection, int productId, int status) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE tblProducts SET status=? WHERE productID=?")) {
+            statement.setInt(1, status);
+            statement.setInt(2, productId);
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Could not update seed product " + productId + ".");
+            }
+        }
+    }
+
+    private static final class StockTestFixture implements AutoCloseable {
+        private final int productId;
+        private final boolean created;
+        private final int oldQuantity;
+        private final int oldStatus;
+
+        private StockTestFixture(int productId, boolean created, int oldQuantity, int oldStatus) {
+            this.productId = productId;
+            this.created = created;
+            this.oldQuantity = oldQuantity;
+            this.oldStatus = oldStatus;
+        }
+
+        static StockTestFixture prepare() throws Exception {
+            try (Connection connection = openDatabase()) {
+                try (PreparedStatement find = connection.prepareStatement(
+                        "SELECT TOP 1 productID, quantity, status FROM tblProducts WHERE productName=? ORDER BY productID")) {
+                    find.setString(1, STOCK_TEST_NAME);
+                    try (ResultSet result = find.executeQuery()) {
+                        if (result.next()) {
+                            int id = result.getInt("productID");
+                            int quantity = result.getInt("quantity");
+                            int status = result.getInt("status");
+                            try (PreparedStatement update = connection.prepareStatement(
+                                    "UPDATE tblProducts SET quantity=2, status=1 WHERE productID=?")) {
+                                update.setInt(1, id);
+                                update.executeUpdate();
+                            }
+                            return new StockTestFixture(id, false, quantity, status);
+                        }
+                    }
+                }
+
+                LocalDate today = LocalDate.now();
+                String insertSql = "INSERT INTO tblProducts "
+                        + "(productName, image, price, quantity, categoryID, importDate, expiryDate, status) "
+                        + "VALUES (?, NULL, 10000, 2, 'TAO', ?, ?, 1)";
+                try (PreparedStatement insert = connection.prepareStatement(insertSql, Statement.RETURN_GENERATED_KEYS)) {
+                    insert.setString(1, STOCK_TEST_NAME);
+                    insert.setDate(2, Date.valueOf(today));
+                    insert.setDate(3, Date.valueOf(today.plusDays(30)));
+                    insert.executeUpdate();
+                    try (ResultSet keys = insert.getGeneratedKeys()) {
+                        if (!keys.next()) throw new SQLException("Could not get Stock Test product ID.");
+                        return new StockTestFixture(keys.getInt(1), true, 0, 1);
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void close() throws Exception {
+            try (Connection connection = openDatabase()) {
+                String sql = created
+                        ? "DELETE FROM tblProducts WHERE productID=?"
+                        : "UPDATE tblProducts SET quantity=?, status=? WHERE productID=?";
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    if (created) {
+                        statement.setInt(1, productId);
+                    } else {
+                        statement.setInt(1, oldQuantity);
+                        statement.setInt(2, oldStatus);
+                        statement.setInt(3, productId);
+                    }
+                    statement.executeUpdate();
+                }
+            }
+        }
     }
 }
